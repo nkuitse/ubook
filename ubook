@@ -4,6 +4,7 @@ use strict;
 use warnings;
 
 use File::Glob qw(glob);
+use File::Basename qw(basename dirname);
 use Getopt::Std qw(getopts);
 
 sub move;
@@ -27,9 +28,9 @@ my %opt = (
     's' => undef, # Shell
     'b' => undef, # Base
     'c' => undef, # Comment (real name)
-    'u' => 0,     # UID
-    'm' => 0,     # Min UID
-    'M' => 0,     # Max UID
+    'u' => undef, # UID
+    'm' => undef, # Min UID
+    'M' => undef, # Max UID
     'n' => 0,     # Dry run?
     'v' => 0,     # Verbose?
     'a' => 0,     # All?
@@ -38,13 +39,13 @@ my %opt = (
     'H' => 0,     # Don't create home dir?
     'q' => 0,     # Only check?
 );
-getopts(':d:p:h:s:b:c:u:m:M:nvaRPHq', \%opt) or usage;
-my $book = $opt{'d'};
-my $err = 0;
-
 usage if !@ARGV;
 my $cmd = shift;
 my $sub = __PACKAGE__->can('cmd_' . $cmd) || usage;
+
+getopts(':d:p:h:s:b:c:u:m:M:nvaRPHq', \%opt) or usage;
+my $book = $opt{'d'};
+my $err = 0;
 
 print STDERR "Dry run...\n" if $opt{'n'};
 $sub->();
@@ -56,6 +57,11 @@ sub cmd_lu { goto &cmd_list       }
 sub cmd_lg { goto &cmd_listgroup  }
 sub cmd_lp { goto &cmd_listproto  }
 sub cmd_ls { goto &cmd_listseries }
+
+sub cmd_u  { goto &cmd_show       }
+sub cmd_g  { goto &cmd_showgroup  }
+sub cmd_p  { goto &cmd_showproto  }
+sub cmd_s  { goto &cmd_showseries }
 
 sub cmd_nu { goto &cmd_new       }
 sub cmd_ng { goto &cmd_newgroup  }
@@ -150,6 +156,7 @@ sub cmd_newseries {
     my %series;
     fatal "Series already exists" if -e "$book/series/$s";
     makedir "$book/series/$s";
+    makedir "$book/series/$s/$min";
     rxwrite "$book/series/$s/series.rx", {
         'min' => $min,
         defined $max ? ('max' => $max) : (),
@@ -175,13 +182,17 @@ sub cmd_newproto {
     makelink "../../series/$s", "$book/proto/$p/series";
     rxwrite "$book/proto/$p/proto.rx", {
         'description' => $d,
+        'proto' => $p,
     };
 }
 
 sub cmd_import {
-    my ($host, $uid, $min, $max, $all);
+    my $host = $opt{'h'};
+    my $uid  = $opt{'u'};
+    my $min  = $opt{'m'} || 1;
+    my $max  = $opt{'M'} || 65535;
     $min = $max = $uid if defined $uid;
-    if (!$opt{'a'}) {
+    if (!$host && !$opt{'a'}) {
         $host = lc `hostname -s`;
         chomp $host;
     }
@@ -209,19 +220,75 @@ sub cmd_import {
     }
 }
 
+sub cmd_show {
+    @ARGV = users() if !@ARGV;
+    foreach my $u (@ARGV) {
+        my $user = rxread("$book/user/$u/user.rx");
+        rxwrite(\*STDOUT, $user);
+        print "\n" if $u ne $ARGV[-1];
+    }
+}
+
+sub cmd_showgroup {
+    @ARGV = groups() if !@ARGV;
+    foreach my $g (@ARGV) {
+        my $group = rxread("$book/group/$g/group.rx");
+        rxwrite(\*STDOUT, $group);
+        print "\n" if $g ne $ARGV[-1];
+    }
+}
+
+sub cmd_showproto {
+    @ARGV = protos() if !@ARGV;
+    foreach my $p (@ARGV) {
+        my $proto = rxread("$book/proto/$p/proto.rx");
+        rxwrite(\*STDOUT, $proto);
+        print "\n" if $p ne $ARGV[-1];
+    }
+}
+
+sub cmd_showseries {
+    @ARGV = series() if !@ARGV;
+    foreach my $p (@ARGV) {
+        my $series = rxread("$book/series/$p/series.rx");
+        rxwrite(\*STDOUT, $series);
+        print "\n" if $p ne $ARGV[-1];
+    }
+}
+
 # Other functions
+
+sub users {
+    return map { my $d = dirname($_); -l $d ? () : basename($d) }
+           glob("$book/user/*/user.rx");
+}
+
+sub groups {
+    return map { my $d = dirname($_); -l $d ? () : basename($d) }
+           glob("$book/group/*/group.rx");
+}
+
+sub protos {
+    return map { my $d = dirname($_); -l $d ? () : basename($d) }
+           glob("$book/proto/*/proto.rx");
+}
+
+sub series {
+    return map { my $d = dirname($_); -l $d ? () : basename($d) }
+           glob("$book/series/*/series.rx");
+}
 
 sub choose_prototype {
     fatal "Can't choose a prototype -- not running interactively" if !$interactive;
-    my @protos = sort { $a->{'id'} cmp $b->{'id'} }
+    my @protos = sort { $a->{'proto'} cmp $b->{'proto'} }
                  map { rxread $_ }
                  glob("$book/proto/*/proto.rx");
     fatal "There are no prototypes to choose from" if !@protos;
     my $i = 0;
-    my $w = max map { length $_->{'id'} } @protos;
+    my $w = max map { length $_->{'proto'} } @protos;
     print STDERR "Prototypes defined:\n";
     foreach (@protos) {
-        printf STDERR "  %2d) %-${w}.${w}s %s\n", ++$i, $_->{'id'}, $_->{'description'}||'';
+        printf STDERR "  %2d) %-${w}.${w}s %s\n", ++$i, $_->{'proto'}, $_->{'description'}||'';
     }
     while (1) {
         print STDERR "Choose one: ";
@@ -331,11 +398,17 @@ sub rxread {
 sub rxwrite {
     my ($f, $rx) = @_;
     return if $opt{'n'};
-    open my $fh, '>', $f or fatal "Can't open $f for writing: $!";
+    my $fh;
+    if (ref $f) {
+        $fh = $f;
+    }
+    else {
+        open $fh, '>', $f or fatal "Can't open $f for writing: $!";
+    }
     while (my ($k, $v) = each %$rx) {
         print $fh "$k $v\n" if defined $v && !ref $v;
     }
-    close $fh;
+    close $fh if !ref $f;
 }
 
 sub move {
@@ -365,7 +438,7 @@ sub makelink {
 
 sub alloc {
     my ($proto, $l, $u) = @_;
-    my $p = $proto->{'id'};
+    my $p = $proto->{'proto'};
     my $pdir = "$book/proto/$p";
     my $sdir = "$pdir/series";
     my $udir = "$book/user";
