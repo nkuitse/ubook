@@ -1,0 +1,31 @@
+ubook new [-u UID] [-g GROUP|GID]... PROTO LOGIN
+umake [-n] USER|UID
+
+.../ubook/
+    series/
+        application/
+            next/
+                3000/
+        flo-staff/
+            next/
+                2013/
+            free/
+                2001/
+                (etc.)
+        member-staff/
+            next/
+                6008/
+    user/
+        2009/
+            user.rx
+            instances/
+        paul -> 2009
+    group/
+        2009/
+            group.rx
+            instances/
+        paul -> 2009
+
+
+   0-1999   legacy
+2000-2199   FLO office staff
