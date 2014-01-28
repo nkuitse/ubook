@@ -78,8 +78,8 @@ sub run {
 
 sub user {
     my ($login) = @_;
-    fatal "Login $login has not been defined" if ! -e "$dir/user/$login/user.rx";
-    open my $fh, '<', "$dir/user/$login/user.rx" or fatal "Can't open recipe for user $login: $!";
+    fatal "login $login has not been defined" if ! -e "$dir/user/$login/user.rx";
+    open my $fh, '<', "$dir/user/$login/user.rx" or fatal "can't open recipe for user $login: $!";
     while (<$fh>) {
         next if /^\s*(?:#.*)?$/;  # Skip blank lines and comments
         chomp;
@@ -87,21 +87,21 @@ sub user {
         $user{$1} = $2;
     }
     close $fh;
-    fatal "Huh?" if $user{'login'} ne $login;
+    fatal "huh?" if $user{'login'} ne $login;
     my ($uid, $gid, $comment, $home) =
-        map { defined $user{$_} ? $user{$_} : fatal "User recipe lacks $_" }
+        map { defined $user{$_} ? $user{$_} : fatal "user recipe lacks $_" }
             qw(uid gid comment home);
     fatal "I won't touch root or wheel!"
         if !$uid || !$gid;
     $user{'shell'} = find_shell($user{'shell'} || '/')
-        || fatal "No shell found";
+        || fatal "no shell found";
     return %user;
 }
 
 sub group {
     my ($group) = @_;
-    fatal "Group $group has not been defined" if ! -e "$dir/group/$group/group.rx";
-    open my $fh, '<', "$dir/group/$group/group.rx" or fatal "Can't open recipe for group $group $!";
+    fatal "group $group has not been defined" if ! -e "$dir/group/$group/group.rx";
+    open my $fh, '<', "$dir/group/$group/group.rx" or fatal "can't open recipe for group $group $!";
     my %group;
     while (<$fh>) {
         next if /^\s*(?:#.*)?$/;  # Skip blank lines and comments
@@ -110,8 +110,8 @@ sub group {
         $group{$key} = $val;
     }
     close $fh;
-    fatal "Huh?" if $group{'gid'} ne $group;
-    fatal "Huh???" if !defined $group{'gid'};
+    fatal "huh?" if $group{'gid'} ne $group;
+    fatal "huh???" if !defined $group{'gid'};
     fatal "I won't touch root or wheel!"
         if !$gid;
     return %group;
@@ -125,7 +125,7 @@ sub find_shell {
             return $s if -f $s && -x _;
         }
         elsif ($s =~ m{/}) {
-            fatal "Invalid shell: $shell";
+            fatal "invalid shell: $shell";
         }
         else {
             foreach (@path) {
