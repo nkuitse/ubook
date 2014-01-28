@@ -34,6 +34,7 @@ my %opt = (
     'n' => 0,     # Dry run?
     'v' => 0,     # Verbose?
     'a' => 0,     # All?
+    'l' => 0,     # Long?
     'R' => 0,     # Don't realloc?
     'P' => 0,     # Ask for password?
     'H' => 0,     # Don't create home dir?
@@ -43,7 +44,7 @@ usage if !@ARGV;
 my $cmd = shift;
 my $sub = __PACKAGE__->can('cmd_' . $cmd) || usage;
 
-getopts(':d:p:h:s:b:c:u:m:M:nvaRPHq', \%opt) or usage;
+getopts(':d:p:h:s:b:c:u:m:M:nvalRPHq', \%opt) or usage;
 my $book = $opt{'d'};
 my $err = 0;
 
@@ -70,17 +71,8 @@ sub cmd_ns { goto &cmd_newseries }
 
 # Command handlers
 
-sub list {
-    my ($type) = @_;
-    foreach (glob("$book/$type/*/$type.rx")) {
-        my $t = (split m{/})[-2];
-        if (-l "$book/$type/$t") {
-            print $t, ' -> ', readlink("$book/$type/$t"), "\n" if $opt{'a'};
-        }
-        else {
-            print $t, "\n";
-        }
-    }
+sub cmd_init {
+    makedir($book, map { "$book/$_" } qw(user group proto series));
 }
 
 sub cmd_list       { list('user') }
@@ -90,28 +82,39 @@ sub cmd_listseries { list('series') }
 
 sub cmd_new {
     # Define a new user
-    my (%user, $proto, $l);
+    my ($p, $proto, $l);
     if (@ARGV == 0) {
-        $proto = choose_prototype();
         ask 'Login :' => $l or cancelled;
+        $proto = choose_prototype();
+        $p = $proto->{'proto'};
+    }
+    elsif (@ARGV == 1) {
+        ($l) = @ARGV;
+        $proto = choose_prototype();
+        $p = $proto->{'proto'};
     }
     elsif (@ARGV == 2) {
-        my $p = shift @ARGV;
+        $p = shift @ARGV;
         $proto = rxread "$book/proto/$p/proto.rx";
         $l = shift @ARGV;
     }
     else {
         usage('usage: ubook [OPT]... new PROTO LOGIN');
     }
-    my $user = alloc($proto, $l, \%user);
-    my $uid = $user->{'uid'};
+    my $user = rxread "$book/proto/$p/user.rx";
+    $user->{'home'}   ||= $user->{'base'} . '/' . $l if $user->{'base'};
+    $user->{'shell'}  ||= '/bin/sh';
+    $user->{'groups'} ||= '';
+    ask 'Name   :' => $user->{'comment'} and
+    ask 'Home   :' => $user->{'home'}    and
+    ask 'Shell  :' => $user->{'shell'}   and
+    ask 'Groups :' => $user->{'groups'}  or cancelled;
+    $user->{'groups'} =~ s/,?\s+/ /g;
+    $user = alloc($proto, $l, $user);
+    my $uid  = $user->{'uid'};
     my $udir = "$book/user/$uid";
-    $user->{'home'}  ||= $user->{'base'} . '/' . $l if $user->{'base'};
-    $user->{'shell'} ||= '/bin/sh';
-    $user->{'gid'}   ||= $uid;
-    ask 'Home  :' => $user->{'home'}  and
-    ask 'Shell :' => $user->{'shell'} and
-    ask 'Group :' => $user->{'gid'}   or cancelled;
+    my $gid = $user->{'gid'} ||= $uid;
+    makelink $gid, "$book/group/$l";
     rxwrite "$udir/user.rx", $user;
 }
 
@@ -144,6 +147,11 @@ sub cmd_newseries {
         ask 'Min. UID :' => $min and
         ask 'Max. UID :' => $max or cancelled;
     }
+    elsif (@ARGV == 1) {
+        ($s) = @ARGV;
+        ask 'Min. UID :' => $min and
+        ask 'Max. UID :' => $max or cancelled;
+    }
     elsif (@ARGV == 2) {
         ($s, $min) = @ARGV;
     }
@@ -151,15 +159,15 @@ sub cmd_newseries {
         ($s, $min, $max) = @ARGV;
     }
     else {
-        usage 'newseries [SERIES MIN [MAX]]';
+        usage 'newseries [SERIES [MIN [MAX]]]';
     }
     my %series;
     fatal "Series already exists" if -e "$book/series/$s";
     makedir "$book/series/$s";
     makedir "$book/series/$s/$min";
     rxwrite "$book/series/$s/series.rx", {
-        'min' => $min,
-        defined $max ? ('max' => $max) : (),
+        'minuid' => $min,
+        defined $max ? ('maxuid' => $max) : (),
     };
 }
 
@@ -172,6 +180,12 @@ sub cmd_newproto {
     }
     elsif (@ARGV == 3) {
         ($p, $s, $d) = @ARGV;
+    }
+    elsif (@ARGV == 1) {
+        ($p) = @ARGV;
+        $s = $p;
+        ask 'Series      :' => $s and
+        ask 'Description :' => $d or cancelled;
     }
     else {
         usage 'newproto [ID SERIES DESCRIP]';
@@ -258,6 +272,26 @@ sub cmd_showseries {
 
 # Other functions
 
+sub list {
+    my ($type) = @_;
+    foreach (glob("$book/$type/*/$type.rx")) {
+        my $d = dirname($_);
+        my $t = basename($d);
+        if ($type =~ /^(?:proto|series)$/) {
+            print $t, "\n";
+        }
+        elsif ($opt{'l'}) {
+            printf "%5d %s\n", readlink($d), $t if -l $d;
+        }
+        elsif (-l $d) {
+            print $t, ' -> ', readlink($d), "\n" if $opt{'a'};
+        }
+        else {
+            print $t, "\n";
+        }
+    }
+}
+
 sub users {
     return map { my $d = dirname($_); -l $d ? () : basename($d) }
            glob("$book/user/*/user.rx");
@@ -281,7 +315,7 @@ sub series {
 sub choose_prototype {
     fatal "Can't choose a prototype -- not running interactively" if !$interactive;
     my @protos = sort { $a->{'proto'} cmp $b->{'proto'} }
-                 map { rxread $_ }
+                 map  { my $proto = rxread($_); $proto->{'proto'} ||= $_; $proto }
                  glob("$book/proto/*/proto.rx");
     fatal "There are no prototypes to choose from" if !@protos;
     my $i = 0;
