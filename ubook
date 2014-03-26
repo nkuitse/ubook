@@ -137,34 +137,20 @@ sub cmd_newgroup {
         'group' => $grp,
         'gid' => $gid,
     };
-    makelink "$book/group/$gid", "$book/group/$grp";
+    makelink $gid, "$book/group/$grp";
 }
 
 sub cmd_newseries {
-    my ($s, $min, $max);
-    if (@ARGV == 0) {
-        ask 'Series   :' => $s   and
-        ask 'Min. UID :' => $min and
-        ask 'Max. UID :' => $max or cancelled;
-    }
-    elsif (@ARGV == 1) {
-        ($s) = @ARGV;
-        ask 'Min. UID :' => $min and
-        ask 'Max. UID :' => $max or cancelled;
-    }
-    elsif (@ARGV == 2) {
-        ($s, $min) = @ARGV;
-    }
-    elsif (@ARGV == 3) {
-        ($s, $min, $max) = @ARGV;
-    }
-    else {
-        usage 'newseries [SERIES [MIN [MAX]]]';
-    }
+    usage 'newseries [SERIES [MIN [MAX]]]' if @ARGV > 3;
+    my ($s, $min, $max) = @ARGV;
+    ask 'Series   :' => $s   or cancelled if !defined $s;
+    ask 'Min. UID :' => $min or cancelled if !defined $min;
+    ask 'Max. UID :' => $max              if !defined $max;
     my %series;
     fatal "Series already exists" if -e "$book/series/$s";
-    makedir "$book/series/$s";
-    makedir "$book/series/$s/$min";
+    makedir "$book/series/$s",
+            "$book/series/$s/$min",
+            "$book/series/$s/$min/next";
     rxwrite "$book/series/$s/series.rx", {
         'minuid' => $min,
         defined $max ? ('maxuid' => $max) : (),
@@ -172,31 +158,30 @@ sub cmd_newseries {
 }
 
 sub cmd_newproto {
-    my ($p, $s, $d);
-    if (@ARGV == 0) {
-        ask 'Proto ID    :' => $p and
-        ask 'Series      :' => $s and
-        ask 'Description :' => $d or cancelled;
-    }
-    elsif (@ARGV == 3) {
-        ($p, $s, $d) = @ARGV;
-    }
-    elsif (@ARGV == 1) {
-        ($p) = @ARGV;
-        $s = $p;
-        ask 'Series      :' => $s and
-        ask 'Description :' => $d or cancelled;
-    }
-    else {
-        usage 'newproto [ID SERIES DESCRIP]';
-    }
+    usage 'newproto [PROTO [SERIES [DESCRIPTION]]]' if @ARGV > 3;
+    my ($p, $s, $d) = @ARGV;
+    ask 'Prototype    :' => $p or cancelled if !defined $p;
+    ask 'Series       :' => $s or cancelled if !defined $s;
+    ask 'Description  :' => $d or cancelled if !defined $d;
     fatal "Proto $p already exists"  if  -e "$book/proto/$p";
     fatal "Series $s does not exist" if !-e "$book/series/$s";
+    my $base = '/home';
+    my $group = $s;
+    my $groups = '';
+    ask 'Base         :' => $base;
+    ask 'Group        :' => $group;
+    ask 'Other groups :' => $groups;
+    $groups =~ s/,?\s+/ /g;
     makedir "$book/proto/$p";
     makelink "../../series/$s", "$book/proto/$p/series";
     rxwrite "$book/proto/$p/proto.rx", {
         'description' => $d,
         'proto' => $p,
+    };
+    rxwrite "$book/proto/$p/user.rx", {
+        defined $base ? ('base' => $base) : (),
+        'group' => $group,
+        'groups' => $groups,
     };
 }
 
@@ -274,6 +259,7 @@ sub cmd_showseries {
 
 sub list {
     my ($type) = @_;
+    my @out;
     foreach (glob("$book/$type/*/$type.rx")) {
         my $d = dirname($_);
         my $t = basename($d);
@@ -281,7 +267,7 @@ sub list {
             print $t, "\n";
         }
         elsif ($opt{'l'}) {
-            printf "%5d %s\n", readlink($d), $t if -l $d;
+            printf "%d %s\n", readlink($d), $t if -l $d;
         }
         elsif (-l $d) {
             print $t, ' -> ', readlink($d), "\n" if $opt{'a'};
@@ -322,7 +308,7 @@ sub choose_prototype {
     my $w = max map { length $_->{'proto'} } @protos;
     print STDERR "Prototypes defined:\n";
     foreach (@protos) {
-        printf STDERR "  %2d) %-${w}.${w}s %s\n", ++$i, $_->{'proto'}, $_->{'description'}||'';
+        printf STDERR "  %2d) %-${w}.${w}s  - %s\n", ++$i, $_->{'proto'}, $_->{'description'}||'';
     }
     while (1) {
         print STDERR "Choose one: ";
@@ -525,7 +511,7 @@ sub fatal($) {
     exit 2;
 }
 
-sub cancelled { exit -1 }
+sub cancelled { print STDERR "cancelled\n"; exit -1 }
 
 sub usage {
     my $msg = @_ ? shift() : 'COMMAND [ARGV]...';

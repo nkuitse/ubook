@@ -31,9 +31,13 @@ my @user = getpwnam($login);
 fatal "User $login already exists" if @user && !$dryrun;
 
 my %user = user($login);
-my ($uid, $gid, $comment, $home, $shell) = @user{qw(uid gid comment home shell)};
+my ($uid, $gid, $comment, $home, $shell, $groups) = @user{qw(uid gid comment home shell groups)};
+my @groups;
+@groups = split /,?\s+/, $groups if defined $groups;
 
-print STDERR "Dry run -- no changes will be made\n";
+print STDERR "Dry run -- no changes will be made\n" if $dryrun;
+
+# Create primary group if necessary
 my @group = getgrgid($gid);
 if (!@group) {
     # Create the group first
@@ -46,6 +50,21 @@ if (!@group) {
     run 'create group' => @groupadd;
 }
 
+# Create any secondary groups as necessary
+foreach my $g (@groups) {
+    my @group = getgrnam($g);
+    if (!@group) {
+        # Create the group first
+        my %group = group($g);
+        my @groupadd = (
+            '/usr/sbin/groupadd',
+            '-g' => $group{'gid'},
+            $g
+        );
+        run 'create group' => @groupadd;
+    }
+}
+
 my @useradd = (
     '/usr/sbin/useradd',
     '-u' => $uid,
@@ -54,6 +73,7 @@ my @useradd = (
     '-c' => $comment,
     '-s' => $shell,
 );
+push @useradd, '-G', join(',', @groups) if @groups;
 push @useradd, '-m' if !$nohome;
 push @useradd, $login;
 run 'create user' => @useradd;
@@ -68,12 +88,13 @@ sub run {
     my $task = shift;
     if ($dryrun) {
         my $cmd = join(' ', map { quotem($_) } @_);
-        print STDERR "$task:\n  $cmd\n\n";
-        return;
+        print STDERR "$task:\n  $cmd\n";
     }
-    my $err = system @_;
-    fatal -1, "$task failed: $!" if $err == -1;
-    fatal $err >> 8, "$task failed: $!" if $err;
+    else {
+        my $err = system @_;
+        fatal -1, "$task failed: $!" if $err == -1;
+        fatal $err >> 8, "$task failed: $!" if $err;
+    }
 }
 
 sub user {
@@ -110,7 +131,7 @@ sub group {
         $group{$key} = $val;
     }
     close $fh;
-    fatal "huh?" if $group{'gid'} ne $group;
+    fatal "huh?" if $group =~ /^\d+$/ && $group{'gid'} ne $group;
     fatal "huh???" if !defined $group{'gid'};
     fatal "I won't touch root or wheel!"
         if !$gid;
