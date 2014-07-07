@@ -1,21 +1,30 @@
 include config.mk
 
-SOURCES = $(PROG) $(PROG).1 Makefile README LICENSE config.mk
+SOURCES = $(SCRIPT) $(SCRIPT).1 $(SCRIPT).conf.example Makefile README LICENSE config.mk
 
-default: $(PROG).tmp $(PROG).1.tmp
+default: $(SCRIPT).tmp $(SCRIPT).1.tmp
 
-$(PROG).tmp: $(PROG) config.mk
+.tmp.1: config.mk
 	m4 -P -D__VERSION__="$(VERSION)" -D__AUTHOR__="$(AUTHOR)" -D__COPYRIGHT__="$(COPYRIGHT)" $< > $@
 
-$(PROG).1.tmp: $(PROG).1 config.mk
-	m4 -P -D__VERSION__="$(VERSION)" -D__AUTHOR__="$(AUTHOR)" -D__COPYRIGHT__="$(COPYRIGHT)" $< > $@
+### $(SCRIPT).tmp: $(SCRIPT) config.mk
+### 	m4 -P -D__VERSION__="$(VERSION)" -D__AUTHOR__="$(AUTHOR)" -D__COPYRIGHT__="$(COPYRIGHT)" $< > $@
+### 
+### $(SCRIPT).1.tmp: $(SCRIPT).1 config.mk
+### 	m4 -P -D__VERSION__="$(VERSION)" -D__AUTHOR__="$(AUTHOR)" -D__COPYRIGHT__="$(COPYRIGHT)" $< > $@
 
-install: $(PROG).tmp $(PROG).1.tmp
-	mkdir -p $(BINDIR) $(MANDIR)
-	install $(PROG).tmp $(BINDIR)/$(PROG)
-	install $(PROG).1.tmp $(MANDIR)/$(PROG).1
+install: $(SCRIPT).tmp $(SCRIPT).1.tmp
+	mkdir -p $(BINDIR) $(MANDIR) $(ETCDIR)
+	install $(SCRIPT).tmp   $(BINDIR)
+	install $(SCRIPT).1.tmp $(MANDIR)
+	install $(SCRIPT).conf.example $(ETCDIR)
+	for a in $(COMMANDS); do \
+	    rm -f $(BINDIR)/\$a $(MANDIR)/\$a.1
+	    ln -s $(SCRIPT)   $(BINDIR)/\$a
+	    ln -s $(SCRIPT).1 $(MANDIR)/\$a.1
+	done
 
-dist: $(PROG)-$(VERSION).tar.gz
+dist: $(PKG)-$(VERSION).tar.gz
 
 $(PROG)-$(VERSION).tar.gz: $(PROG)-$(VERSION)
 	tar -czf $@ $<

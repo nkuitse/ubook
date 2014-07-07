@@ -1,0 +1,539 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use File::Glob qw(glob);
+use File::Basename qw(basename dirname);
+use Getopt::Std qw(getopts);
+
+sub move;
+sub makedir;
+sub makelink;
+sub rxread;
+sub rxwrite;
+sub ask($\$);
+sub max(@);
+sub cancelled;
+sub fatal($);
+sub usage;
+
+my $interactive = -t STDIN;
+
+my $path = '/bin:/usr/bin';
+my %opt = (
+    'd' => $ENV{'UBOOK'} ||= '/var/local/ubook',
+    'p' => $path, # PATH
+    'h' => undef, # Host or home
+    's' => undef, # Shell
+    'b' => undef, # Base
+    'c' => undef, # Comment (real name)
+    'u' => undef, # UID
+    'm' => undef, # Min UID
+    'M' => undef, # Max UID
+    'n' => 0,     # Dry run?
+    'v' => 0,     # Verbose?
+    'a' => 0,     # All?
+    'l' => 0,     # Long?
+    'R' => 0,     # Don't realloc?
+    'P' => 0,     # Ask for password?
+    'H' => 0,     # Don't create home dir?
+    'q' => 0,     # Only check?
+);
+usage if !@ARGV;
+my $cmd = shift;
+my $sub = __PACKAGE__->can('cmd_' . $cmd) || usage;
+
+getopts(':d:p:h:s:b:c:u:m:M:nvalRPHq', \%opt) or usage;
+my $book = $opt{'d'};
+my $err = 0;
+
+print STDERR "Dry run...\n" if $opt{'n'};
+$sub->();
+exit $err;
+
+# Command aliases
+
+sub cmd_lu { goto &cmd_list       }
+sub cmd_lg { goto &cmd_listgroup  }
+sub cmd_lp { goto &cmd_listproto  }
+sub cmd_ls { goto &cmd_listseries }
+
+sub cmd_u  { goto &cmd_show       }
+sub cmd_g  { goto &cmd_showgroup  }
+sub cmd_p  { goto &cmd_showproto  }
+sub cmd_s  { goto &cmd_showseries }
+
+sub cmd_nu { goto &cmd_new        }
+sub cmd_ng { goto &cmd_newgroup   }
+sub cmd_np { goto &cmd_newproto   }
+sub cmd_ns { goto &cmd_newseries  }
+
+sub cmd_eu { goto &cmd_edit       }
+sub cmd_eg { goto &cmd_editgroup  }
+sub cmd_ep { goto &cmd_editproto  }
+sub cmd_es { goto &cmd_editseries }
+
+# Command handlers
+
+sub cmd_init {
+    makedir($book, map { "$book/$_" } qw(user group proto series));
+}
+
+sub cmd_list       { list('user') }
+sub cmd_listgroup  { list('group') }
+sub cmd_listproto  { list('proto') }
+sub cmd_listseries { list('series') }
+
+sub cmd_edit       { edit('user') }
+sub cmd_editgroup  { edit('group') }
+sub cmd_editproto  { edit('proto') }
+sub cmd_editseries { edit('series') }
+
+sub cmd_new {
+    # Define a new user
+    my ($p, $proto, $l);
+    if (@ARGV == 0) {
+        ask 'Login :' => $l or cancelled;
+        $proto = choose_prototype();
+        $p = $proto->{'proto'};
+    }
+    elsif (@ARGV == 1) {
+        ($l) = @ARGV;
+        $proto = choose_prototype();
+        $p = $proto->{'proto'};
+    }
+    elsif (@ARGV == 2) {
+        $p = shift @ARGV;
+        $proto = rxread "$book/proto/$p/proto.rx";
+        $l = shift @ARGV;
+    }
+    else {
+        usage('usage: ubook [OPT]... new PROTO LOGIN');
+    }
+    my $user = rxread "$book/proto/$p/user.rx";
+    $user->{'home'}   ||= $user->{'base'} . '/' . $l if $user->{'base'};
+    $user->{'shell'}  ||= '/bin/sh';
+    $user->{'groups'} ||= '';
+    ask 'Name   :' => $user->{'comment'} and
+    ask 'Home   :' => $user->{'home'}    and
+    ask 'Shell  :' => $user->{'shell'}   and
+    ask 'Groups :' => $user->{'groups'}  or cancelled;
+    $user->{'groups'} =~ s/,?\s+/ /g;
+    $user = alloc($proto, $l, $user);
+    my $uid  = $user->{'uid'};
+    my $udir = "$book/user/$uid";
+    my $gid = $user->{'gid'} ||= $uid;
+    makelink $gid, "$book/group/$l";
+    rxwrite "$udir/user.rx", $user;
+}
+
+sub cmd_newgroup {
+    my ($grp, $gid);
+    if (@ARGV == 0) {
+        ask 'Group name :' => $grp and
+        ask 'GID        :' => $gid or cancelled;
+    }
+    elsif (@ARGV == 2) {
+        ($grp, $gid) = @ARGV;
+    }
+    else {
+        usage;
+    }
+    fatal "Group $grp already exists" if -e "$book/group/$grp";
+    fatal "Group $gid already exists" if -e "$book/group/$gid";
+    makedir "$book/group/$gid";
+    rxwrite "$book/group/$gid/group.rx", {
+        'group' => $grp,
+        'gid' => $gid,
+    };
+    makelink $gid, "$book/group/$grp";
+}
+
+sub cmd_newseries {
+    usage 'newseries [SERIES [MIN [MAX]]]' if @ARGV > 3;
+    my ($s, $min, $max) = @ARGV;
+    ask 'Series   :' => $s   or cancelled if !defined $s;
+    ask 'Min. UID :' => $min or cancelled if !defined $min;
+    ask 'Max. UID :' => $max              if !defined $max;
+    my %series;
+    fatal "Series already exists" if -e "$book/series/$s";
+    makedir "$book/series/$s",
+            "$book/series/$s/$min",
+            "$book/series/$s/$min/next";
+    rxwrite "$book/series/$s/series.rx", {
+        'minuid' => $min,
+        defined $max ? ('maxuid' => $max) : (),
+    };
+}
+
+sub cmd_newproto {
+    usage 'newproto [PROTO [SERIES [DESCRIPTION]]]' if @ARGV > 3;
+    my ($p, $s, $d) = @ARGV;
+    ask 'Prototype    :' => $p or cancelled if !defined $p;
+    ask 'Series       :' => $s or cancelled if !defined $s;
+    ask 'Description  :' => $d or cancelled if !defined $d;
+    fatal "Proto $p already exists"  if  -e "$book/proto/$p";
+    fatal "Series $s does not exist" if !-e "$book/series/$s";
+    my $base = $opt{'b'} || '/home';
+    my $group = $s;
+    my $groups = '';
+    ask 'Base         :' => $base;
+    ask 'Group        :' => $group;
+    ask 'Other groups :' => $groups;
+    $groups =~ s/,?\s+/ /g;
+    makedir "$book/proto/$p";
+    makelink "../../series/$s", "$book/proto/$p/series";
+    rxwrite "$book/proto/$p/proto.rx", {
+        'description' => $d,
+        'proto' => $p,
+    };
+    rxwrite "$book/proto/$p/user.rx", {
+        defined $base ? ('base' => $base) : (),
+        'group' => $group,
+        'groups' => $groups,
+    };
+}
+
+sub cmd_import {
+    my $host = $opt{'h'};
+    my $uid  = $opt{'u'};
+    my $min  = $opt{'m'} || 1;
+    my $max  = $opt{'M'} || 65535;
+    $min = $max = $uid if defined $uid;
+    if (!$host && !$opt{'a'}) {
+        $host = lc `hostname -s`;
+        chomp $host;
+    }
+    my ($login, $gid, $comment, $home, $shell);
+    if (@ARGV) {
+        import_from_passwd($host, $_, $min, $max) for @ARGV;
+    }
+    else {
+        while (<STDIN>) {
+            next if /^\s*(?:#.*)?$/;  # Skip blank lines and comments
+            chomp;
+            ($login, undef, $uid, $gid, $comment, $home, $shell) = split /:/, $_, 7;
+            next if $uid < $min || $uid > $max;
+            fatal "No home directory for user $login($uid)" if !defined $home || !length $home;
+            import_user(
+                'host'    => $host,
+                'login'   => $login,
+                'uid'     => $uid,
+                'gid'     => $gid,
+                'comment' => $comment,
+                'home'    => $home,
+                'shell'   => $shell,
+            );
+        }
+    }
+}
+
+sub cmd_show {
+    @ARGV = users() if !@ARGV;
+    foreach my $u (@ARGV) {
+        my $user = rxread("$book/user/$u/user.rx");
+        rxwrite(\*STDOUT, $user);
+        print "\n" if $u ne $ARGV[-1];
+    }
+}
+
+sub cmd_showgroup {
+    @ARGV = groups() if !@ARGV;
+    foreach my $g (@ARGV) {
+        my $group = rxread("$book/group/$g/group.rx");
+        rxwrite(\*STDOUT, $group);
+        print "\n" if $g ne $ARGV[-1];
+    }
+}
+
+sub cmd_showproto {
+    @ARGV = protos() if !@ARGV;
+    foreach my $p (@ARGV) {
+        my $proto = rxread("$book/proto/$p/proto.rx");
+        rxwrite(\*STDOUT, $proto);
+        print "\n" if $p ne $ARGV[-1];
+    }
+}
+
+sub cmd_showseries {
+    @ARGV = series() if !@ARGV;
+    foreach my $p (@ARGV) {
+        my $series = rxread("$book/series/$p/series.rx");
+        rxwrite(\*STDOUT, $series);
+        print "\n" if $p ne $ARGV[-1];
+    }
+}
+
+# Other functions
+
+sub list {
+    my ($type) = @_;
+    my @out;
+    foreach (glob("$book/$type/*/$type.rx")) {
+        my $d = dirname($_);
+        my $t = basename($d);
+        if ($type =~ /^(?:proto|series)$/) {
+            print $t, "\n";
+        }
+        elsif ($opt{'l'}) {
+            printf "%d %s\n", readlink($d), $t if -l $d;
+        }
+        elsif (-l $d) {
+            print $t, ' -> ', readlink($d), "\n" if $opt{'a'};
+        }
+        else {
+            print $t, "\n";
+        }
+    }
+}
+
+sub edit {
+    my ($type) = @_;
+    my $editor = $ENV{'VISUAL'} || $ENV{'EDITOR'} || 'vi';
+    system $editor, map {
+        "$book/$type/$_/$type.rx"
+    } @ARGV;
+}
+
+sub users {
+    return map { my $d = dirname($_); -l $d ? () : basename($d) }
+           glob("$book/user/*/user.rx");
+}
+
+sub groups {
+    return map { my $d = dirname($_); -l $d ? () : basename($d) }
+           glob("$book/group/*/group.rx");
+}
+
+sub protos {
+    return map { my $d = dirname($_); -l $d ? () : basename($d) }
+           glob("$book/proto/*/proto.rx");
+}
+
+sub series {
+    return map { my $d = dirname($_); -l $d ? () : basename($d) }
+           glob("$book/series/*/series.rx");
+}
+
+sub choose_prototype {
+    fatal "Can't choose a prototype -- not running interactively" if !$interactive;
+    my @protos = sort { $a->{'proto'} cmp $b->{'proto'} }
+                 map  { my $proto = rxread($_); $proto->{'proto'} ||= $_; $proto }
+                 glob("$book/proto/*/proto.rx");
+    fatal "There are no prototypes to choose from" if !@protos;
+    my $i = 0;
+    my $w = max map { length $_->{'proto'} } @protos;
+    print STDERR "Prototypes defined:\n";
+    foreach (@protos) {
+        printf STDERR "  %2d) %-${w}.${w}s  - %s\n", ++$i, $_->{'proto'}, $_->{'description'}||'';
+    }
+    while (1) {
+        print STDERR "Choose one: ";
+        my $p = <STDIN>;
+        cancelled if !defined $p;
+        chomp $p;
+        return $protos[$p-1]
+            if $p =~ /^[1-9]\d*$/ && $p <= scalar @protos;
+    }
+}
+
+sub max(@) {
+    my $m = 0;
+    foreach (@_) {
+        $m = $_ if $_ > $m;
+    }
+    return $m;
+}
+
+sub ask($\$) {
+    fatal "Can't ask for login -- not running interactively" if !$interactive;
+    my ($prompt, $ref) = @_;
+    print STDERR $prompt, ' ';
+    print STDERR "[$$ref] " if defined $$ref;
+    my $ans = <STDIN>;
+    return if !defined $ans;
+    chomp $ans;
+    return defined $$ref if !length $ans;
+    $$ref = $ans;
+    return 1;
+}
+
+sub import_from_passwd {
+    my ($host, $user, $min, $max) = @_;
+    my ($login, $uid, $gid, $comment, $home, $shell);
+    if ($user =~ /[^\d]/) {
+        $login = $user;
+        (undef, undef, $uid, $gid, undef, $comment, undef, $home, $shell) = getpwnam($user);
+    }
+    else {
+        $uid = $user;
+        ($login, undef, undef, $gid, undef, $comment, undef, $home, $shell) = getpwuid($user);
+    }
+    return if $uid < $min || $uid > $max;
+    fatal "No such user: $user" if !defined $gid;
+    import_user(
+        'host'    => $host,
+        'login'   => $login,
+        'uid'     => $uid,
+        'gid'     => $gid,
+        'comment' => $comment,
+        'home'    => $home,
+        'shell'   => $shell,
+    );
+}
+
+sub import_user {
+    my %user = @_;
+    my ($host, $login, $uid, $gid, $comment, $home, $shell) = @user{qw(host login uid gid comment home shell)};
+    my $dir = $uid;
+    my $aka = $login;
+    if (defined $host) {
+        $_ .= '@' . $host for $dir, $aka;
+    }
+    foreach ($dir, $aka) {
+        fatal "User $login/$uid already exists" if -e "$book/user/$_";
+    }
+    if ($opt{'n'}) {
+        print STDERR "======== User $login($uid)\n";
+        if (-d "$book/user/$dir" || -d "$book/user/$aka") {
+            print STDERR "ERROR: User already exists\n";
+            $err = 2;
+        }
+        else {
+            print STDERR <<"EOS";
+-------- Commands
+mkdir "$book/user/$dir"
+symlink $dir, "$book/user/$aka"
+chdir "$book/user/$dir"
+-------- Recipe
+EOS
+            print STDERR "$_ $user{$_}\n"
+                for grep { defined $user{$_} }
+                    qw(host login uid gid comment home shell);
+            return;
+        }
+    }
+    makedir "$book/user/$dir";
+    makelink $dir, "$book/user/$aka";
+    rxwrite "$book/user/$dir/user.rx", \%user;
+    print STDERR "User $aka($dir) imported\n" if $opt{'v'};
+}
+
+sub rxread {
+    my ($f) = @_;
+    my %rx;
+    open my $fh, '<', $f or fatal "Can't open $f for reading $!";
+    while (<$fh>) {
+        next if /^\s*(?:#.*)?$/;  # Skip blank lines and comments
+        m/^(\S+)\s+(.*)$/ or return;
+        $rx{$1} = $2;
+    }
+    close $fh;
+    return \%rx;
+}
+
+sub rxwrite {
+    my ($f, $rx) = @_;
+    return if $opt{'n'};
+    my $fh;
+    if (ref $f) {
+        $fh = $f;
+    }
+    else {
+        open $fh, '>', $f or fatal "Can't open $f for writing: $!";
+    }
+    while (my ($k, $v) = each %$rx) {
+        print $fh "$k $v\n" if defined $v && !ref $v;
+    }
+    close $fh if !ref $f;
+}
+
+sub move {
+    my ($f1, $f2) = @_;
+    return if $opt{'n'};
+    rename $f1, $f2 or fatal "Can't rename $f1 to $f2: $!";
+}
+
+sub makedir {
+    return if $opt{'n'};
+    foreach my $d (@_) {
+        -d $d or mkdir $d or fatal "Can't mkdir $d: $!";
+    }
+}
+
+sub deldir {
+    my ($d) = @_;
+    return if $opt{'n'};
+    rmdir $d or fatal "Can't rmdir $d: $!";
+}
+
+sub makelink {
+    my ($f1, $f2) = @_;
+    return if $opt{'n'};
+    symlink $f1, $f2 or fatal "Can't create symlink $f2 -> $f1";
+}
+
+sub alloc {
+    my ($proto, $l, $u) = @_;
+    my $p = $proto->{'proto'};
+    my $pdir = "$book/proto/$p";
+    my $sdir = "$pdir/series";
+    my $udir = "$book/user";
+    my $gdir = "$book/group";
+    fatal "User $l has already been defined" if -e "$udir/$l";
+    fatal "No such prototype: $p"      if !-e $pdir;
+    fatal "No series for prototype $p" if !-e $sdir;
+    my ($next, @etc) = glob("$sdir/*/next");
+    fatal "No next UID in prototype series $sdir" if !defined $next;
+    fatal "Multiple UID files in prototype series $sdir" if @etc;
+    $next =~ m{/(\d+)/next$} or fatal "Bad UID in prototype series: $next";
+    my ($uid, $nuid) = ($1, $1 + 1);
+    my $gid = $uid;
+    fatal "A group with GID $gid already exists" if -e "$book/group/$gid";
+    my $series = -e "$sdir/series.rx" ? rxread "$sdir/series.rx" : {};
+    my $maxuid = $series->{'maxuid'} || 0;
+    if ($nuid <= $maxuid && !$opt{'R'}) {
+        makedir "$sdir/$nuid";
+        move $next, "$sdir/$nuid/next";
+    }
+    else {
+        deldir $next;
+    }
+    my $user = rxread "$book/proto/$p/user.rx";
+    $user->{$_} = $u->{$_} for grep { defined $u->{$_} } keys %$u;
+    if (defined $user->{'match'}) {
+        my $rx = qr/$user->{'match'}/;
+        $l =~ $rx or fatal "Login $l doesn't match proto pattern $user->{'match'}";
+        delete $user->{'match'};
+    }
+    makedir "$udir/$uid";
+    makedir "$gdir/$gid";
+    rxwrite "$gdir/$gid/group.rx", {
+        'gid' => $gid,
+        'group' => $l,
+    };
+    makelink $uid, "$udir/$l";
+    deldir "$sdir/$uid";
+    @$user{qw(uid login)} = ($uid, $l);
+    return $user;
+}
+
+sub login {
+    my ($l) = @_;
+}
+
+sub fatal($) {
+    my ($msg) = @_;
+    print STDERR "ubook: $msg\n";
+    exit 2;
+}
+
+sub cancelled { print STDERR "cancelled\n"; exit -1 }
+
+sub usage {
+    my $msg = @_ ? shift() : 'COMMAND [ARGV]...';
+    print STDERR 'usage: ubook ', $msg, "\n";
+    exit 1;
+}
+

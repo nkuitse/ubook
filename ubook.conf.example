@@ -1,0 +1,11 @@
+# ........ @PROTO  { LOGIN       : PASS : UID         : GID     : COMMENT : HOME            : SHELL   } ........ SECONDARY-GROUP(S)
+@proto user staff  { %l          : x    : [2001,5000) : %u      : %c      : /home/%l        : zsh     } in @staff
+@proto user guest  { %l ~ /^gx-/ : x    : [5001,6000) : %u      : %c      : /home/guest/%l  : bash    } in @guest
+@proto user vendor { %l ~ /^vx-/ : x    : [6001,7000) : @vendor : %c      : /home/vendor/%l : scponly } in @vendor
+
+# @Guest and vendor accounts
+@def user { vx-crazy : x : 6001 : 6001 : Big Crazy Vendor : /home/vendor/vx-crazy : scponly } in @vendor
+
+@def group { staff  : x : 2000 }
+@def group { guest  : x : 5000 }
+@def group { vendor : x : 6000 }
